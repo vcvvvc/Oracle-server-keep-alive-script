@@ -70,6 +70,46 @@ sh oalive.sh --update
 - 安全：所有任务都有原子目录锁，避免并发重入；卸载时按锁和精确脚本路径停止任务，不再靠模糊进程名匹配。
 - 日志：日志写入 `/var/log/oalive`，单文件默认 128 KiB 自动轮转到 `.1`。
 
+## Oracle 分支推荐配置
+
+`oracle` 分支记录了当前在 1 OCPU / 2 逻辑 CPU Oracle Always Free 实例上使用的配置。安装交互时可按这些值填写：
+
+- CPU 模式：`1` 本机 POSIX，占用目标 `60`
+- 内存：启用，`MEMORY_TARGET_PERCENT=25`，`MEMORY_HOLD_SECONDS=300`，`MEMORY_REST_SECONDS=300`
+- 带宽：启用，模式 `2` 受控下载，自定义参数，`BANDWIDTH_RATE_MBPS=10`，`BANDWIDTH_DURATION_MINUTES=6`，`BANDWIDTH_INTERVAL_MINUTES=45`
+
+最终 `/etc/oalive/oalive.conf` 关键项应类似：
+
+```sh
+CPU_QUOTA_PERCENT=60
+CPU_CYCLE_SECONDS=10
+MEMORY_TARGET_PERCENT=25
+MEMORY_HOLD_SECONDS=300
+MEMORY_REST_SECONDS=300
+BANDWIDTH_MODE=wget
+BANDWIDTH_INTERVAL_MINUTES=45
+BANDWIDTH_DURATION_MINUTES=6
+BANDWIDTH_RATE_PERCENT=100
+BANDWIDTH_RATE_MBPS=10
+```
+
+systemd 环境额外使用 `/etc/systemd/system/cpu-limit.service.d/quota.conf` 限制 CPU 忙时上限：
+
+```ini
+[Service]
+CPUQuota=70%
+```
+
+这个组合的含义是：CPU 脚本按 60% 单核配额做周期占用，`CPUQuota=70%` 再限制忙时最高上限。`CPU_CYCLE_SECONDS=10` 时，大致是忙 6 秒、休 4 秒；在 2 逻辑 CPU 机器上，理论整机平均约 21%，实际会受系统负载和监控采样影响。
+
+带宽下载源按日本东京、香港、新加坡、美西、fallback 顺序尝试。某个源探测失败、下载报错或文件提前下载完，会自动尝试下一个源；每一轮总下载时长仍受 `BANDWIDTH_DURATION_MINUTES` 限制，不会因为切源重新计时。
+
+辅助脚本：
+
+- `scripts/test_bandwidth_urls.sh`：测试内置下载源，日志写入 `/tmp/oalive-bandwidth-url-test.log`。
+- `scripts/silent_oalive_check.sh`：静默检查服务、timer、配置和 CPU 采样，默认 5 分钟、5 秒间隔，日志写入 `/tmp/oalive-silent-check-*.log`。
+- `scripts/apply_cpu_60_60.sh`：应用当前 CPU 推荐值；默认实际为 `CPU_QUOTA_PERCENT=60` 和 `CPUQuota=70%`，可用 `CPU_TARGET=... CPU_QUOTA=...` 覆盖。
+
 ## 文件位置
 
 - 配置：`/etc/oalive/oalive.conf`

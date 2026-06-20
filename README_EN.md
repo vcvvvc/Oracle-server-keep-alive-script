@@ -68,6 +68,46 @@ sh oalive.sh --update
 - Logging: Logs go to `/var/log/oalive`; each file rotates at 128 KiB by default.
 - Runtime messages: Installer, status, error, and runtime logs include both Chinese and English text.
 
+## Oracle Branch Recommended Config
+
+The `oracle` branch documents the runtime settings currently used on a 1 OCPU / 2 logical CPU Oracle Always Free instance. During install, use these answers:
+
+- CPU mode: `1` native POSIX occupier, target `60`
+- Memory: enabled, `MEMORY_TARGET_PERCENT=25`, `MEMORY_HOLD_SECONDS=300`, `MEMORY_REST_SECONDS=300`
+- Bandwidth: enabled, mode `2` controlled download, custom parameters, `BANDWIDTH_RATE_MBPS=10`, `BANDWIDTH_DURATION_MINUTES=6`, `BANDWIDTH_INTERVAL_MINUTES=45`
+
+The key `/etc/oalive/oalive.conf` values should look like:
+
+```sh
+CPU_QUOTA_PERCENT=60
+CPU_CYCLE_SECONDS=10
+MEMORY_TARGET_PERCENT=25
+MEMORY_HOLD_SECONDS=300
+MEMORY_REST_SECONDS=300
+BANDWIDTH_MODE=wget
+BANDWIDTH_INTERVAL_MINUTES=45
+BANDWIDTH_DURATION_MINUTES=6
+BANDWIDTH_RATE_PERCENT=100
+BANDWIDTH_RATE_MBPS=10
+```
+
+On systemd hosts, `/etc/systemd/system/cpu-limit.service.d/quota.conf` also limits the busy-time CPU ceiling:
+
+```ini
+[Service]
+CPUQuota=70%
+```
+
+This means the CPU script targets 60% of one-core quota, while `CPUQuota=70%` caps the busy phase. With `CPU_CYCLE_SECONDS=10`, it is roughly 6 seconds busy and 4 seconds idle. On a 2 logical CPU instance, the theoretical whole-machine average is about 21%; real monitoring values depend on background load and sampling windows.
+
+Bandwidth sources are tried in this order: Tokyo, Hong Kong, Singapore, US West, then fallback sources. If one source fails probing, errors during download, or finishes early, the script continues with the next source. The whole run is still capped by `BANDWIDTH_DURATION_MINUTES`; switching sources does not restart the timer.
+
+Helper scripts:
+
+- `scripts/test_bandwidth_urls.sh`: tests built-in download sources and writes `/tmp/oalive-bandwidth-url-test.log`.
+- `scripts/silent_oalive_check.sh`: silently checks services, timer, config, and CPU samples. Defaults to 5 minutes with 5-second samples, writing `/tmp/oalive-silent-check-*.log`.
+- `scripts/apply_cpu_60_60.sh`: applies the current recommended CPU config. Despite the historical file name, defaults are `CPU_QUOTA_PERCENT=60` and `CPUQuota=70%`; override with `CPU_TARGET=... CPU_QUOTA=...`.
+
 ## Paths
 
 - Config: `/etc/oalive/oalive.conf`
