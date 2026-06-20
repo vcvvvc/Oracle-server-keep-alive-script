@@ -107,6 +107,7 @@ cleanup() {
   trap - INT TERM EXIT
   [ -n "${RUN_PID:-}" ] && kill "$RUN_PID" 2>/dev/null || true
   [ -n "${TIMER_PID:-}" ] && kill "$TIMER_PID" 2>/dev/null || true
+  [ -n "${TIMEOUT_FLAG:-}" ] && rm -f "$TIMEOUT_FLAG" 2>/dev/null || true
   rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 
@@ -138,32 +139,59 @@ normalize_settings() {
 }
 
 download_urls() {
-  cat <<'URLS'
-https://speed.cloudflare.com/__down?bytes=1000000000
-http://mirror.nl.leaseweb.net/speedtest/1000mb.bin
-http://mirror.dal10.us.leaseweb.net/speedtest/1000mb.bin
-http://mirror.hk.leaseweb.net/speedtest/1000mb.bin
-http://mirror.sfo12.us.leaseweb.net/speedtest/1000mb.bin
-http://mirror.de.leaseweb.net/speedtest/1000mb.bin
-http://mirror.syd10.au.leaseweb.net/speedtest/1000mb.bin
-https://speed.hetzner.de/1GB.bin
-http://proof.ovh.net/files/1Gio.dat
+  cat <<'URLS' | awk '
+    /^[[:space:]]*#/ {next}
+    /^[[:space:]]*$/ {next}
+    {print}
+  '
+# Asia: Tokyo
+http://tyo.download.datapacket.com/100mb.bin
+http://tyo.download.datapacket.com/1000mb.bin
+http://tyo.download.datapacket.com/10000mb.bin
+https://hnd-jp-ping.vultr.com/vultr.com.100MB.bin
+https://hnd-jp-ping.vultr.com/vultr.com.1000MB.bin
+
+# Asia: Hong Kong
+http://hkg.download.datapacket.com/100mb.bin
+http://hkg.download.datapacket.com/1000mb.bin
+http://hkg.download.datapacket.com/10000mb.bin
+
+# Asia: Singapore
+http://sgp.download.datapacket.com/100mb.bin
+http://sgp.download.datapacket.com/1000mb.bin
+http://sgp.download.datapacket.com/10000mb.bin
+https://sgp.proof.ovh.net/files/100Mb.dat
+https://sgp-ping.vultr.com/vultr.com.100MB.bin
+https://sgp.proof.ovh.net/files/1Gb.dat
+https://sgp-ping.vultr.com/vultr.com.1000MB.bin
+https://sgp.proof.ovh.net/files/10Gb.dat
+
+# North America: US West
+http://lax.download.datapacket.com/100mb.bin
+http://lax.download.datapacket.com/1000mb.bin
+http://lax.download.datapacket.com/10000mb.bin
+https://hil.proof.ovh.us/files/100Mb.dat
+https://lax-ca-us-ping.vultr.com/vultr.com.100MB.bin
+https://hil.proof.ovh.us/files/1Gb.dat
+https://lax-ca-us-ping.vultr.com/vultr.com.1000MB.bin
+https://hil.proof.ovh.us/files/10Gb.dat
+https://hil-speed.hetzner.com/10GB.bin
+
+# Existing general fallback
 http://speedtest.tele2.net/1GB.zip
 URLS
-}
-
-url_count() {
-  download_urls | awk 'END {print NR}'
 }
 
 probe_url() {
   url=$1
   if command -v curl >/dev/null 2>&1; then
-    curl -fsIL --connect-timeout 3 --max-time 5 "$url" >/dev/null 2>&1
+    curl -fsSL --connect-timeout 5 --max-time 10 --range 0-1023 \
+      -o /dev/null "$url" >/dev/null 2>&1
     return $?
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget --spider --timeout=5 --tries=1 "$url" >/dev/null 2>&1
+    wget -q --timeout=10 --tries=1 --header='Range: bytes=0-1023' \
+      -O /dev/null "$url" >/dev/null 2>&1
     return $?
   fi
   if command -v fetch >/dev/null 2>&1; then
@@ -173,33 +201,11 @@ probe_url() {
   return 1
 }
 
-select_url() {
+candidate_urls() {
   if [ -n "$BANDWIDTH_URL" ]; then
     printf '%s\n' "$BANDWIDTH_URL"
-    return 0
   fi
-
-  count=$(url_count)
-  is_uint "$count" || count=1
-  minute=$(date '+%M' 2>/dev/null || echo 0)
-  is_uint "$minute" || minute=0
-  start=$((minute % count + 1))
-  checked=0
-  index=$start
-
-  while [ "$checked" -lt "$BANDWIDTH_URL_CHECKS" ]; do
-    url=$(download_urls | awk -v n="$index" 'NR == n {print; exit}')
-    [ -n "$url" ] || url=$(download_urls | awk 'NR == 1 {print; exit}')
-    if probe_url "$url"; then
-      printf '%s\n' "$url"
-      return 0
-    fi
-    checked=$((checked + 1))
-    index=$((index + 1))
-    [ "$index" -le "$count" ] || index=1
-  done
-
-  printf '%s\n' 'https://speed.cloudflare.com/__down?bytes=1000000000'
+  download_urls
 }
 
 speedtest_bin() {
@@ -266,10 +272,13 @@ rate_bytes_per_second() {
 run_with_timeout() {
   seconds=$1
   shift
+  TIMEOUT_FLAG=$RUN_DIR/oalive-bandwidth-timeout.$$
+  rm -f "$TIMEOUT_FLAG" 2>/dev/null || true
   "$@" &
   RUN_PID=$!
   (
     sleep "$seconds"
+    : >"$TIMEOUT_FLAG"
     kill "$RUN_PID" 2>/dev/null || true
   ) &
   TIMER_PID=$!
@@ -279,6 +288,11 @@ run_with_timeout() {
   wait "$TIMER_PID" 2>/dev/null || true
   RUN_PID=
   TIMER_PID=
+  if [ -f "$TIMEOUT_FLAG" ]; then
+    rm -f "$TIMEOUT_FLAG" 2>/dev/null || true
+    return 124
+  fi
+  rm -f "$TIMEOUT_FLAG" 2>/dev/null || true
   return "$rc"
 }
 
@@ -288,7 +302,7 @@ download_with_limit() {
   seconds=$3
 
   if command -v curl >/dev/null 2>&1; then
-    run_with_timeout "$seconds" curl -fsSL --connect-timeout 10 --max-time "$seconds" --limit-rate "$rate" -o /dev/null "$url"
+    run_with_timeout "$seconds" curl -fsSL --connect-timeout 10 --limit-rate "$rate" -o /dev/null "$url"
     return $?
   fi
   if command -v wget >/dev/null 2>&1; then
@@ -309,11 +323,51 @@ run_wget_mode() {
   mbps=$(measure_bandwidth_mbps)
   rate=$(rate_bytes_per_second "$mbps")
   seconds=$((BANDWIDTH_DURATION_MINUTES * 60))
-  url=$(select_url)
+  start_ts=$(date '+%s' 2>/dev/null || echo 0)
+  is_uint "$start_ts" || start_ts=0
+  end_ts=$((start_ts + seconds))
+  tried=0
 
-  log "开始带宽占用：${BANDWIDTH_DURATION_MINUTES}分钟，测速=${mbps}Mbps，限速=${rate}B/s，URL=$url / Starting bandwidth occupier: ${BANDWIDTH_DURATION_MINUTES} minutes, measured=${mbps}Mbps, limit=${rate}B/s"
-  download_with_limit "$url" "$rate" "$seconds" || log "带宽占用下载提前结束或失败 / Bandwidth download ended early or failed"
-  log "带宽占用结束 / Bandwidth occupier finished"
+  for url in $(candidate_urls); do
+    now_ts=$(date '+%s' 2>/dev/null || echo 0)
+    is_uint "$now_ts" || now_ts=0
+    remaining=$((end_ts - now_ts))
+    if [ "$remaining" -le 0 ]; then
+      log "带宽占用结束 / Bandwidth occupier finished"
+      return 0
+    fi
+
+    [ -n "$url" ] || continue
+    tried=$((tried + 1))
+    if ! probe_url "$url"; then
+      log "下载源探测失败，跳过 URL=$url / URL probe failed, skipping URL=$url"
+      continue
+    fi
+
+    now_ts=$(date '+%s' 2>/dev/null || echo 0)
+    is_uint "$now_ts" || now_ts=0
+    remaining=$((end_ts - now_ts))
+    if [ "$remaining" -le 0 ]; then
+      log "带宽占用结束 / Bandwidth occupier finished"
+      return 0
+    fi
+
+    log "开始带宽占用：剩余${remaining}秒，配置=${BANDWIDTH_DURATION_MINUTES}分钟，测速=${mbps}Mbps，限速=${rate}B/s，URL=$url / Starting bandwidth occupier: remaining=${remaining}s, configured=${BANDWIDTH_DURATION_MINUTES} minutes, measured=${mbps}Mbps, limit=${rate}B/s"
+    download_with_limit "$url" "$rate" "$remaining"
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      log "带宽占用结束 / Bandwidth occupier finished"
+      return 0
+    fi
+    log "下载源下载提前结束或失败，切换下一个 URL=$url / Download ended early or failed, trying next URL=$url"
+  done
+
+  if [ "$tried" -eq 0 ]; then
+    log "未找到可用下载源 / No download sources available"
+  else
+    log "所有下载源都失败，本轮未产生有效流量 / All download sources failed, no effective bandwidth usage this run"
+  fi
+  return 1
 }
 
 run_speedtest_mode() {
