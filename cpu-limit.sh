@@ -132,6 +132,25 @@ normalize_settings() {
   [ "$CPU_CYCLE_SECONDS" -ge 2 ] || CPU_CYCLE_SECONDS=10
 }
 
+cpu_is_busy() {
+  # What：采样 Linux 全局 CPU 使用率，判断是否达到指定阈值。
+  # Why：steal 和 I/O 等待都会直接造成 VPS 卡顿，应计入启动保护。
+  threshold=${1:-30}
+  is_uint "$threshold" || threshold=30
+  [ -r /proc/stat ] || return 1
+  first=$(awk '$1 == "cpu" {busy=$2+$3+$4+$6+$7+$8+$9; printf "%.0f %.0f\n", busy, busy+$5; exit}' /proc/stat 2>/dev/null)
+  sleep 1
+  second=$(awk '$1 == "cpu" {busy=$2+$3+$4+$6+$7+$8+$9; printf "%.0f %.0f\n", busy, busy+$5; exit}' /proc/stat 2>/dev/null)
+  first_busy=${first%% *}; first_total=${first#* }
+  second_busy=${second%% *}; second_total=${second#* }
+  is_uint "$first_busy" && is_uint "$first_total" || return 1
+  is_uint "$second_busy" && is_uint "$second_total" || return 1
+  busy_delta=$((second_busy - first_busy))
+  total_delta=$((second_total - first_total))
+  [ "$busy_delta" -ge 0 ] && [ "$total_delta" -gt 0 ] || return 1
+  [ $((busy_delta * 100)) -ge $((total_delta * threshold)) ]
+}
+
 full_worker() {
   trap 'exit 0' INT TERM
   if command -v yes >/dev/null 2>&1; then
@@ -193,6 +212,22 @@ start_workers() {
   fi
 }
 
+monitor_workers() {
+  # What：运行期间周期检查 CPU，并在高负载时清理 worker。
+  # Why：启动后的外部负载变化不能由一次性启动检查覆盖。
+  while :; do
+    sleep 30
+    if cpu_is_busy 50; then
+      log "当前CPU使用率达到50%，停止本轮占用 / Current CPU usage is at least 50%, stopping this run"
+      cleanup
+      return 0
+    fi
+    for pid in $worker_pids; do
+      pid_is_alive "$pid" || return 0
+    done
+  done
+}
+
 case ${1:-} in
   --help|-h)
     printf '%s\n' "Usage: sh cpu-limit.sh"
@@ -210,9 +245,13 @@ normalize_settings
 acquire_lock
 trap terminate INT TERM
 trap cleanup EXIT
+if cpu_is_busy 30; then
+  log "当前CPU使用率达到30%，跳过本轮占用 / Current CPU usage is at least 30%, skipping this run"
+  exit 0
+fi
 start_workers
 
-wait
+monitor_workers
 rc=$?
 log "CPU工作进程已退出，返回码=$rc / CPU worker exited, rc=$rc"
 exit "$rc"
