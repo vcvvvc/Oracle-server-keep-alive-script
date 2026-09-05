@@ -20,6 +20,7 @@ OALIVE_CONFIG=${OALIVE_CONFIG:-/etc/oalive/oalive.conf}
 [ -r "$OALIVE_CONFIG" ] && . "$OALIVE_CONFIG"
 
 LOG_DIR=${OALIVE_LOG_DIR:-/var/log/oalive}
+STATE_DIR=${OALIVE_STATE_DIR:-/var/lib/oalive}
 RUN_DIR=${OALIVE_RUN_DIR:-${TMPDIR:-/tmp}}
 LOG_FILE=${BANDWIDTH_LOG_FILE:-$LOG_DIR/bandwidth_occupier.log}
 LOCK_DIR=$RUN_DIR/oalive-bandwidth.lock
@@ -71,6 +72,33 @@ log() {
   line="$(now) $*"
   printf '%s\n' "$line"
   [ "$LOG_FILE" = /dev/null ] || printf '%s\n' "$line" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+should_skip_recent_run() {
+  [ "${BANDWIDTH_FORCE:-0}" = 1 ] && return 1
+  is_uint "$BANDWIDTH_INTERVAL_MINUTES" || BANDWIDTH_INTERVAL_MINUTES=45
+  [ "$BANDWIDTH_INTERVAL_MINUTES" -ge 1 ] || BANDWIDTH_INTERVAL_MINUTES=45
+  last_file=$STATE_DIR/bandwidth.last
+  [ -r "$last_file" ] || return 1
+  last=$(sed -n '1p' "$last_file" 2>/dev/null || echo 0)
+  is_uint "$last" || last=0
+  now_s=$(date '+%s' 2>/dev/null || echo 0)
+  is_uint "$now_s" || now_s=0
+  [ "$last" -gt 0 ] && [ "$now_s" -gt 0 ] || return 1
+  interval_seconds=$((BANDWIDTH_INTERVAL_MINUTES * 60))
+  if [ $((now_s - last)) -lt "$interval_seconds" ]; then
+    log "距离上次带宽占用未满间隔，跳过本轮 / Last bandwidth run is still within interval, skipping this run"
+    return 0
+  fi
+  return 1
+}
+
+mark_run_started() {
+  [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  now_s=$(date '+%s' 2>/dev/null || echo 0)
+  is_uint "$now_s" || return 0
+  [ "$now_s" -gt 0 ] || return 0
+  printf '%s\n' "$now_s" >"$STATE_DIR/bandwidth.last" 2>/dev/null || true
 }
 
 pid_is_alive() {
@@ -411,6 +439,11 @@ RUN_PID=
 TIMER_PID=
 normalize_settings
 acquire_lock
+if should_skip_recent_run; then
+  cleanup
+  exit 0
+fi
+mark_run_started
 trap terminate INT TERM
 trap cleanup EXIT
 

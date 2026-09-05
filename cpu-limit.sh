@@ -133,14 +133,14 @@ normalize_settings() {
 }
 
 cpu_is_busy() {
-  # What：采样 Linux 全局 CPU 使用率，判断是否达到指定阈值。
-  # Why：steal 和 I/O 等待都会直接造成 VPS 卡顿，应计入启动保护。
+  # What：采样实例实际 CPU 运算时间，判断是否达到指定阈值。
+  # Why：steal 和 I/O 等待不是实例自身运算，不能误判为 CPU 使用率。
   threshold=${1:-30}
   is_uint "$threshold" || threshold=30
   [ -r /proc/stat ] || return 1
-  first=$(awk '$1 == "cpu" {busy=$2+$3+$4+$6+$7+$8+$9; printf "%.0f %.0f\n", busy, busy+$5; exit}' /proc/stat 2>/dev/null)
+  first=$(awk '$1 == "cpu" {busy=$2+$3+$4+$7+$8; printf "%.0f %.0f\n", busy, busy+$5+$6+$9; exit}' /proc/stat 2>/dev/null)
   sleep 1
-  second=$(awk '$1 == "cpu" {busy=$2+$3+$4+$6+$7+$8+$9; printf "%.0f %.0f\n", busy, busy+$5; exit}' /proc/stat 2>/dev/null)
+  second=$(awk '$1 == "cpu" {busy=$2+$3+$4+$7+$8; printf "%.0f %.0f\n", busy, busy+$5+$6+$9; exit}' /proc/stat 2>/dev/null)
   first_busy=${first%% *}; first_total=${first#* }
   second_busy=${second%% *}; second_total=${second#* }
   is_uint "$first_busy" && is_uint "$first_total" || return 1

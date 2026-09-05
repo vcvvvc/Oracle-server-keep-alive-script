@@ -3,7 +3,7 @@ Description=Run Oracle keep-alive bandwidth occupier periodically
 
 [Timer]
 OnBootSec=15min
-OnUnitActiveSec=45min
+OnUnitInactiveSec=45min
 AccuracySec=1min
 Persistent=true
 Unit=bandwidth_occupier.service

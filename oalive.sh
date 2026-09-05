@@ -448,7 +448,8 @@ EOF
   cat >"$SYSTEMD_DIR/bandwidth_occupier.timer.d/interval.conf" <<EOF
 [Timer]
 OnUnitActiveSec=
-OnUnitActiveSec=${BANDWIDTH_INTERVAL_MINUTES}min
+OnUnitInactiveSec=
+OnUnitInactiveSec=${BANDWIDTH_INTERVAL_MINUTES}min
 EOF
   [ -s "$SYSTEMD_DIR/bandwidth_occupier.timer.d/interval.conf" ] || return 1
 
@@ -527,11 +528,60 @@ install_cron() {
   /bin/sh "$INSTALL_DIR/oalive-cron-runner.sh" >/dev/null 2>&1 || true
 }
 
+install_cron_fallback() {
+  if ! command -v crontab >/dev/null 2>&1; then
+    warn "未找到 crontab，无法安装带宽兜底监督器" "crontab not found; cannot install bandwidth fallback supervisor"
+    return 0
+  fi
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/oalive-cron.XXXXXX") || return 1
+  new=$(mktemp "${TMPDIR:-/tmp}/oalive-cron-new.XXXXXX") || {
+    rm -f "$tmp"
+    return 1
+  }
+  crontab -l >"$tmp" 2>/dev/null || : >"$tmp"
+  awk -v begin="$CRON_BEGIN" -v end="$CRON_END" '
+    $0 == begin {skip=1; next}
+    $0 == end {skip=0; next}
+    !skip {print}
+  ' "$tmp" >"$new"
+  cron_runner_cmd=$(cron_escape "/bin/sh $(sq "$INSTALL_DIR/oalive-cron-runner.sh") >/dev/null 2>&1")
+  {
+    printf '%s\n' "$CRON_BEGIN"
+    printf '%s\n' "* * * * * $cron_runner_cmd"
+    printf '%s\n' "$CRON_END"
+  } >>"$new"
+  if ! crontab "$new"; then
+    rm -f "$tmp" "$new"
+    warn "cron兜底监督器安装失败" "Failed to install cron fallback supervisor"
+    return 1
+  fi
+  rm -f "$tmp" "$new"
+}
+
 service_status() {
   unit=$1
   if [ "$SCHEDULER" = systemd ] && command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       printf '%s\n' active
+    elif ! systemctl show --property=SystemState --value >/dev/null 2>&1; then
+      case $unit in
+        *.service)
+          if [ -d "/sys/fs/cgroup/system.slice/$unit" ]; then
+            printf '%s\n' "unknown(cgroup-present)"
+          else
+            printf '%s\n' "unknown(systemctl-unavailable)"
+          fi
+          ;;
+        *.timer)
+          if [ -e "$SYSTEMD_DIR/timers.target.wants/$unit" ]; then
+            printf '%s\n' "unknown(enabled)"
+          else
+            printf '%s\n' "unknown(systemctl-unavailable)"
+          fi
+          ;;
+        *) printf '%s\n' "unknown(systemctl-unavailable)" ;;
+      esac
     else
       printf '%s\n' inactive
     fi
@@ -713,6 +763,9 @@ install_all() {
       SCHEDULER=cron
       install_cron
     }
+    if [ "$SCHEDULER" = systemd ] && [ "$BANDWIDTH_ENABLED" = 1 ]; then
+      install_cron_fallback || warn "cron兜底监督器安装失败，带宽占用将只依赖systemd timer" "Cron fallback supervisor failed; bandwidth occupier will rely on systemd timer only"
+    fi
   else
     install_cron
   fi
@@ -804,6 +857,9 @@ status() {
   note "配置文件：$CONFIG_FILE" "Config file: $CONFIG_FILE"
 
   if [ "$SCHEDULER" = systemd ]; then
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl show --property=SystemState --value >/dev/null 2>&1; then
+      warn "无法连接 systemd，总线状态不可用；以下状态使用有限回退判断" "Cannot connect to systemd; statuses below use limited fallback checks"
+    fi
     note "CPU服务：$(service_status cpu-limit.service)" "CPU service: $(service_status cpu-limit.service)"
     note "内存服务：$(service_status memory-limit.service)" "Memory service: $(service_status memory-limit.service)"
     note "带宽定时器：$(service_status bandwidth_occupier.timer)" "Bandwidth timer: $(service_status bandwidth_occupier.timer)"

@@ -151,7 +151,6 @@ run_bandwidth_if_due() {
     release_schedule_lock
     return 0
   fi
-  printf '%s\n' "$now_s" >"$last_file" 2>/dev/null || true
   release_schedule_lock
 
   log "触发带宽占用 / Triggering bandwidth occupier"

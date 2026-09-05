@@ -7,7 +7,7 @@ LOG_DIR=${CHECK_LOG_DIR:-/tmp}
 LOG_FILE=${CHECK_LOG_FILE:-$LOG_DIR/oalive-silent-check-$(date '+%Y%m%d-%H%M%S').log}
 
 CONFIG_FILE=${OALIVE_CONFIG:-/etc/oalive/oalive.conf}
-ENABLED_FILE=${OALIVE_ENABLED_FILE:-/etc/oalive/enabled.conf}
+ENABLED_FILE=${OALIVE_ENABLED_CONFIG:-${OALIVE_ENABLED_FILE:-/etc/oalive/enabled.conf}}
 CPU_CGROUP=/sys/fs/cgroup/system.slice/cpu-limit.service
 MEMORY_CGROUP=/sys/fs/cgroup/system.slice/memory-limit.service
 
@@ -23,6 +23,10 @@ section() {
   log "===== $* ====="
 }
 
+compact() {
+  printf '%s' "$*" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ *//; s/ *$//'
+}
+
 read_kv() {
   file=$1
   key=$2
@@ -33,20 +37,28 @@ service_line() {
   unit=$1
   active=unknown
   enabled=unknown
+  active_rc=127
+  enabled_rc=127
   if command -v systemctl >/dev/null 2>&1; then
-    active=$(systemctl is-active "$unit" 2>/dev/null || true)
-    enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+    active_rc=0
+    active=$(systemctl is-active "$unit" 2>&1) || active_rc=$?
+    enabled_rc=0
+    enabled=$(systemctl is-enabled "$unit" 2>&1) || enabled_rc=$?
+    active=$(compact "$active")
+    enabled=$(compact "$enabled")
   fi
-  log "SERVICE unit=$unit active=$active enabled=$enabled"
+  log "SERVICE unit=$unit active=$active active_rc=$active_rc enabled=$enabled enabled_rc=$enabled_rc"
 }
 
 timer_line() {
   unit=$1
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl show "$unit" \
+    timer_rc=0
+    timer_out=$(systemctl show "$unit" \
       -p ActiveState -p SubState -p NextElapseUSecRealtime -p LastTriggerUSec \
-      --no-pager 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' |
-      while IFS= read -r line; do log "TIMER unit=$unit $line"; done
+      --no-pager 2>&1) || timer_rc=$?
+    timer_out=$(compact "$timer_out")
+    log "TIMER unit=$unit rc=$timer_rc $timer_out"
   else
     log "TIMER unit=$unit systemctl=missing"
   fi
